@@ -1,11 +1,5 @@
 name: Build App
-on:
-  push:
-    branches:
-      - '**'
-  pull_request:
-    branches: 
-      - '**'
+on: workflow_dispatch
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
