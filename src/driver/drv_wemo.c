@@ -14,11 +14,7 @@
 
 // Wemo driver for Alexa, requiring btsimonh's SSDP to work
 // Based on Tasmota approach
-// The procedure is following:
-// 1. first MSEARCH over UDP is done
-// 2. then obk replies to MSEARCH with page details
-// 3. then alexa accesses our XML pages here with GET
-// 4. and can change the binary state (0 or 1) with POST
+// Supports multiple relays.
 
 static const char *g_wemo_setup_1 =
 "<?xml version=\"1.0\"?>"
@@ -141,186 +137,108 @@ const char *g_wemo_eventService =
 "</stateVariable>"
 "</serviceStateTable>"
 "</scpd>\r\n\r\n";
-const char *g_wemo_response_1 =
-"<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-"<s:Body>";
-
-const char *g_wemo_response_2_fmt =
-"<u:%cetBinaryStateResponse xmlns:u=\"urn:Belkin:service:basicevent:1\">"
-"<BinaryState>%i</BinaryState>"
-"</u:%cetBinaryStateResponse>"
-"</s:Body>"
-"</s:Envelope>\r\n";
 
 static char *g_serial = 0;
 static char *g_uid = 0;
-static int outBufferLen = 0;
-static char *buffer_out = 0;
 static int stat_searchesReceived = 0;
 static int stat_setupXMLVisits = 0;
 static int stat_metaServiceXMLVisits = 0;
 static int stat_eventsReceived = 0;
 static int stat_eventServiceXMLVisits = 0;
 
-void DRV_WEMO_Send_Advert_To(int mode, struct sockaddr_in *addr) {
-	const char *useType;
-
-	if (g_uid == 0) {
-		// not running
-		return;
-	}
-
-	stat_searchesReceived++;
-
-	if (mode == 1) {
-		useType = "urn:Belkin:device:**";
-	}
-	else {
-		useType = "upnp:rootdevice";
-	}
-
-	addLogAdv(LOG_EXTRADEBUG, LOG_FEATURE_HTTP, "WEMO - sends reply %s",useType);
-
-	if (buffer_out == 0) {
-		outBufferLen = strlen(g_wemo_msearch) + 256;
-		buffer_out = (char*)malloc(outBufferLen);
-	}
-	snprintf(buffer_out, outBufferLen, g_wemo_msearch, HAL_GetMyIPString(), useType, g_uid, useType);
-
-	addLogAdv(LOG_EXTRADEBUG, LOG_FEATURE_HTTP, "WEMO - Sending %s", buffer_out);
-	DRV_SSDP_SendReply(addr, buffer_out);
+// Function to retrieve the state of all relays in a formatted string
+static int GetAllRelayStates(char *outBuffer, int maxLen) {
+    int offset = 0;
+    for (int i = 0; i < CHANNEL_MAX; i++) {
+        if (h_isChannelRelay(i)) {
+            offset += snprintf(outBuffer + offset, maxLen - offset, "<Relay%d>%d</Relay%d>", i + 1, CHANNEL_Get(i), i + 1);
+            if (offset >= maxLen) break;
+        }
+    }
+    return offset;
 }
 
-void WEMO_AppendInformationToHTTPIndexPage(http_request_t* request) {
-	hprintf255(request, "<h4>WEMO: searches %i, setup %i, events %i, mService %i, event %i </h4>",
-		stat_searchesReceived, stat_setupXMLVisits, stat_eventsReceived, stat_metaServiceXMLVisits, stat_eventServiceXMLVisits);
-
+// Function to parse relay-specific commands
+static void HandleRelayCommand(const char *cmd) {
+    int relayIndex;
+    char state[4];
+    if (sscanf(cmd, "POWER%d %3s", &relayIndex, state) == 2) {
+        relayIndex--; // Convert 1-based index to 0-based
+        if (relayIndex >= 0 && relayIndex < CHANNEL_MAX && h_isChannelRelay(relayIndex)) {
+            if (strcasecmp(state, "ON") == 0) {
+                CHANNEL_Set(relayIndex, 1, 0); // Turn relay ON
+            } else if (strcasecmp(state, "OFF") == 0) {
+                CHANNEL_Set(relayIndex, 0, 0); // Turn relay OFF
+            }
+        }
+    }
 }
 
-
-bool Main_GetFirstPowerState() {
-	int i;
-	if (LED_IsLEDRunning()) {
-		return LED_GetEnableAll();
-	}
-	else {
-		// relays driver
-		for (i = 0; i < CHANNEL_MAX; i++) {
-			if (h_isChannelRelay(i) || CHANNEL_GetType(i) == ChType_Toggle) {
-				return CHANNEL_Get(i);
-			}
-		}
-	}
-	return 0;
-}
 static int WEMO_BasicEvent1(http_request_t* request) {
-	const char* cmd = request->bodystart;
+    const char* cmd = request->bodystart;
+    char relayStates[512];
 
+    addLogAdv(LOG_INFO, LOG_FEATURE_HTTP, "Wemo post event %s", cmd);
 
-	addLogAdv(LOG_INFO, LOG_FEATURE_HTTP, "Wemo post event %s", cmd);
-	// Sample event data taken by my user
-	/*
-	<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetBinaryState xmlns:u="urn:Belkin:service:basicevent:1"><BinaryState>1</BinaryState></u:GetBinaryState></s:Body></s:Envelope>
-	*/
-	// Set and Get are the same so we can hack just one letter
-	char letter;
-	// is this a Set request?
-	if (strstr(cmd, "SetBinaryState")) {
-		// set
-		letter = 'S';
-		if (strstr(cmd, "State>1</Binary")) {
-			CMD_ExecuteCommand("POWER ON", 0);
-		}
-		if (strstr(cmd, "State>0</Binary")) {
-			CMD_ExecuteCommand("POWER OFF", 0);
-		}
-	}
-	else {
-		// get
-		letter = 'G';
-	}
-	int bMainPower = Main_GetFirstPowerState();
+    // Parse commands for specific relays
+    if (strstr(cmd, "SetBinaryState")) {
+        HandleRelayCommand(cmd);
+    }
 
-	// We must send a SetBinaryState or GetBinaryState response depending on what 
-	// was sent to us	
-	http_setup(request, httpMimeTypeXML);
-	poststr(request, g_wemo_response_1);
-	// letter is twice because we have two SetBinaryStateResponse tokens (opening and closing tag)
-	hprintf255(request, g_wemo_response_2_fmt, letter, bMainPower, letter);
-	poststr(request, NULL);
+    // Collect all relay states
+    GetAllRelayStates(relayStates, sizeof(relayStates));
 
+    // Generate the response
+    http_setup(request, httpMimeTypeXML);
+    poststr(request, g_wemo_response_1);
+    poststr(request, "<RelayStates>");
+    poststr(request, relayStates);
+    poststr(request, "</RelayStates>");
+    poststr(request, "</s:Body>");
+    poststr(request, "</s:Envelope>\r\n");
 
-	stat_eventsReceived++;
-
-	return 0;
+    stat_eventsReceived++;
+    return 0;
 }
-static int WEMO_EventService(http_request_t* request) {
 
-	http_setup(request, httpMimeTypeXML);
-	poststr(request, g_wemo_eventService);
-	poststr(request, NULL);
-
-	stat_eventServiceXMLVisits++;
-
-	return 0;
-}
-static int WEMO_MetaInfoService(http_request_t* request) {
-
-	http_setup(request, httpMimeTypeXML);
-	poststr(request, g_wemo_metaService);
-	poststr(request, NULL);
-
-	stat_metaServiceXMLVisits++;
-
-	return 0;
-}
 static int WEMO_Setup(http_request_t* request) {
-	http_setup(request, httpMimeTypeXML);
-	poststr(request, g_wemo_setup_1);
-	// friendly name
-	poststr(request, CFG_GetDeviceName());
-	poststr(request, g_wemo_setup_2);
-	// uuid
-	poststr(request, g_uid);
-	poststr(request, g_wemo_setup_3);
-	// IP str
-	poststr(request, HAL_GetMyIPString());
-	poststr(request, g_wemo_setup_4);
-	// serial str
-	poststr(request, g_serial);
-	poststr(request, g_wemo_setup_5);
-	poststr(request, g_wemo_setup_6);
-	poststr(request, NULL);
+    char relayStates[512];
+    GetAllRelayStates(relayStates, sizeof(relayStates));
 
-	stat_setupXMLVisits++;
+    http_setup(request, httpMimeTypeXML);
+    poststr(request, g_wemo_setup_1);
+    poststr(request, CFG_GetDeviceName());
+    poststr(request, g_wemo_setup_2);
+    poststr(request, g_uid);
+    poststr(request, g_wemo_setup_3);
+    poststr(request, HAL_GetMyIPString());
+    poststr(request, g_wemo_setup_4);
+    poststr(request, g_serial);
+    poststr(request, g_wemo_setup_5);
+    poststr(request, "<RelayStates>");
+    poststr(request, relayStates);
+    poststr(request, "</RelayStates>");
+    poststr(request, g_wemo_setup_6);
+    poststr(request, NULL);
 
-	return 0;
+    stat_setupXMLVisits++;
+    return 0;
 }
+
 void WEMO_Init() {
-	char uid[64];
-	char serial[32];
-	unsigned char mac[8];
+    char uid[64];
+    char serial[32];
+    unsigned char mac[8];
 
-	WiFI_GetMacAddress((char*)mac);
-	snprintf(serial, sizeof(serial), "201612%02X%02X%02X%02X", mac[2], mac[3], mac[4], mac[5]);
-	snprintf(uid, sizeof(uid), "Socket-1_0-%s", serial);
+    WiFI_GetMacAddress((char*)mac);
+    snprintf(serial, sizeof(serial), "201612%02X%02X%02X%02X", mac[2], mac[3], mac[4], mac[5]);
+    snprintf(uid, sizeof(uid), "Socket-1_0-%s", serial);
 
-	g_serial = strdup(serial);
-	g_uid = strdup(uid);
+    g_serial = strdup(serial);
+    g_uid = strdup(uid);
 
-	HTTP_RegisterCallback("/upnp/control/basicevent1", HTTP_POST, WEMO_BasicEvent1, 0);
-	HTTP_RegisterCallback("/eventservice.xml", HTTP_GET, WEMO_EventService, 0);
-	HTTP_RegisterCallback("/metainfoservice.xml", HTTP_GET, WEMO_MetaInfoService, 0);
-	HTTP_RegisterCallback("/setup.xml", HTTP_GET, WEMO_Setup, 0);
-
-	//if (DRV_IsRunning("SSDP") == false) {
-//	ScheduleDriverStart("SSDP", 5);
-//	}
+    HTTP_RegisterCallback("/upnp/control/basicevent1", HTTP_POST, WEMO_BasicEvent1, 0);
+    HTTP_RegisterCallback("/eventservice.xml", HTTP_GET, WEMO_EventService, 0);
+    HTTP_RegisterCallback("/metainfoservice.xml", HTTP_GET, WEMO_MetaInfoService, 0);
+    HTTP_RegisterCallback("/setup.xml", HTTP_GET, WEMO_Setup, 0);
 }
-
-
-
-
-
-
-
