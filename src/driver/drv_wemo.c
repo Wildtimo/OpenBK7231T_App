@@ -11,19 +11,19 @@
 #include "drv_ssdp.h"
 #include "../httpserver/new_http.h"
 
-static const char *g_wemo_response_1 =
-    "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-    "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-    "<s:Body>";
+// Global variables
+static char *g_serial = NULL;
+static char *g_uid = NULL;
 
-const char *g_wemo_eventService = "<scpd xmlns=\"urn:Belkin:service-1-0\">"
-                                  // (your event service XML content here)
-                                  "</scpd>\r\n\r\n";
+// Statistics variables
+static int stat_eventServiceXMLVisits = 0;
+static int stat_metaServiceXMLVisits = 0;
 
-const char *g_wemo_metaService = "<scpd xmlns=\"urn:Belkin:service-1-0\">"
-                                 // (your meta service XML content here)
-                                 "</scpd>\r\n\r\n";
+// Placeholder response
+const char *g_wemo_eventService = "<scpd xmlns=\"urn:Belkin:service-1-0\"></scpd>\r\n\r\n";
+const char *g_wemo_metaService = "<scpd xmlns=\"urn:Belkin:service-1-0\"></scpd>\r\n\r\n";
 
+// Event Service Handler
 static int WEMO_EventService(http_request_t *request) {
     http_setup(request, httpMimeTypeXML);
     poststr(request, g_wemo_eventService);
@@ -32,6 +32,7 @@ static int WEMO_EventService(http_request_t *request) {
     return 0;
 }
 
+// Meta Info Service Handler
 static int WEMO_MetaInfoService(http_request_t *request) {
     http_setup(request, httpMimeTypeXML);
     poststr(request, g_wemo_metaService);
@@ -40,6 +41,23 @@ static int WEMO_MetaInfoService(http_request_t *request) {
     return 0;
 }
 
+// Basic Event Handler
+static int WEMO_BasicEvent1(http_request_t *request) {
+    http_setup(request, httpMimeTypeXML);
+    poststr(request, "BasicEvent1 Response");
+    poststr(request, NULL);
+    return 0;
+}
+
+// Setup Handler
+static int WEMO_Setup(http_request_t *request) {
+    http_setup(request, httpMimeTypeXML);
+    poststr(request, "<Setup Response>");
+    poststr(request, NULL);
+    return 0;
+}
+
+// Initialization Function
 void WEMO_Init() {
     char uid[64];
     char serial[32];
